@@ -12,6 +12,10 @@ const {
   ERC20_ABI,
   PANCAKESWAP_V2_ROUTER_ABI
 } = require('./abis');
+const { loadPatterns, matchPattern } = require('./patternDetection');
+const { shouldBuy, shouldSell } = require('./tradingLogic');
+const { loadWallets } = require('./walletUtils');
+const { loadConfig, saveConfig } = require('./config');
 
 // Simple encryption/decryption utility
 class SimpleSecurityUtils {
@@ -69,11 +73,12 @@ class SimpleSecurityUtils {
 
 class SimplePriceBasedTradingService {
   constructor() {
-    this.config = this.loadConfig();
+    this.config = loadConfig();
+    this.patterns = loadPatterns();
     this.monitoredTokens = new Map();
     this.isMonitoring = false;
     this.monitoringInterval = null;
-    this.availableWallets = [];
+    this.availableWallets = loadWallets(this.config);
     this.activeSellLocks = new Set();
     this.activeBuyLocks = new Set(); // Track tokens currently being bought to prevent duplicate buys
     this.tradedTokens = new Set(); // Track tokens that have been traded to prevent re-trading
@@ -121,6 +126,20 @@ class SimplePriceBasedTradingService {
     ]);
 
     this.loadAvailableWallets();
+
+    const patternsPath = path.join(__dirname, 'patterns.json');
+    let PATTERNS = [];
+    try {
+      if (fs.existsSync(patternsPath)) {
+        const patternsData = fs.readFileSync(patternsPath, 'utf8');
+        PATTERNS = JSON.parse(patternsData).patterns.filter(p => p.enabled);
+        console.log(`✅ Loaded ${PATTERNS.length} enabled trading patterns.`);
+      } else {
+        console.log('⚠️ patterns.json not found, no pattern filtering will be applied.');
+      }
+    } catch (e) {
+      console.error('❌ Error loading patterns.json:', e);
+    }
   }
 
   /**
@@ -726,12 +745,26 @@ class SimplePriceBasedTradingService {
         return null;
       }
 
+      // Extract gas price (in Gwei) and gas limit
+      let gasPriceGwei = undefined;
+      let gasLimit = undefined;
+      if (tx.gasPrice) {
+        gasPriceGwei = Number(tx.gasPrice) / 1e9;
+      }
+      if (tx.gasLimit) {
+        gasLimit = Number(tx.gasLimit);
+      } else if (tx.gas) {
+        gasLimit = Number(tx.gas);
+      }
+
       return {
         tokenAddress: tokenAddress,
         creatorAddress: tx.from,
         blockNumber,
         transactionHash: tx.hash,
-        timestamp: new Date()
+        timestamp: new Date(),
+        gasPriceGwei,
+        gasLimit
       };
 
     } catch (error) {
@@ -746,6 +779,18 @@ class SimplePriceBasedTradingService {
   async processNewToken(tokenCreation) {
     try {
       const tokenAddress = tokenCreation.tokenAddress.toLowerCase();
+      // Debug: print gas price and gas limit for every new token
+      console.log(`🆕 Token detected: ${tokenAddress}`);
+      console.log(`   Gas Price (Gwei): ${tokenCreation.gasPriceGwei}`);
+      console.log(`   Gas Limit: ${tokenCreation.gasLimit}`);
+      // Pattern filtering: check gas price and gas limit using patternDetection.js
+      const matchedPattern = matchPattern(tokenCreation, this.patterns);
+      if (!matchedPattern) {
+        console.log(`⏩ Token ${tokenAddress.slice(0, 8)}... does NOT match any enabled pattern. Skipping.`);
+        return;
+      } else {
+        console.log(`✅ Token ${tokenAddress.slice(0, 8)}... matches pattern: ${matchedPattern.name}`);
+      }
 
       // Check if we're already monitoring this token
       if (this.monitoredTokens.has(tokenAddress)) {
@@ -918,103 +963,72 @@ class SimplePriceBasedTradingService {
       const now = new Date();
       const maxTradesPerToken = Number(this.config.trading.maxTradesPerCycle ?? 2);
       const currentTradeCount = Number(token.tradeCount || 0);
-
-      // Choose thresholds depending on cycle (0=first cycle, >=1=re-entry cycles)
       const isReentryCycle = !!token.hasCompletedFirstCycle;
       const lowBuy = isReentryCycle ? (this.config.trading.reentryLowThresholdUSD ?? this.config.trading.lowThresholdUSD)
         : this.config.trading.lowThresholdUSD;
-      const highSellCfg = isReentryCycle ? (this.config.trading.reentryHighSellThresholdUSD ?? this.config.trading.highSellThresholdUSD ?? this.config.trading.highThresholdUSD)
-        : (this.config.trading.highSellThresholdUSD ?? this.config.trading.highThresholdUSD);
-      const lowSellCfg = isReentryCycle ? (this.config.trading.reentryLowSellThresholdUSD ?? this.config.trading.lowSellThresholdUSD ?? this.config.trading.lowThresholdUSD)
-        : (this.config.trading.lowSellThresholdUSD ?? this.config.trading.lowThresholdUSD);
-      const midSellCfg = isReentryCycle ? (this.config.trading.reentryMiddleSellThresholdUSD ?? this.config.trading.middleSellThresholdUSD ?? this.config.trading.highThresholdUSD)
-        : (this.config.trading.middleSellThresholdUSD ?? this.config.trading.highThresholdUSD);
+      // Use sell thresholds from config or pattern (if available)
+      const firstSellPercent = 20.0;
+      const secondSellPercent = 50.0;
+      const stopLossFromPeakPercent = 15.0;
+      const priceStagnationTimeoutSeconds = 30;
 
-      // Check if we should buy (price exceeds buy threshold and we haven't traded yet)
-      const reentryCooldownMs = (this.config.trading.reentryCooldownSeconds ?? 0) * 1000;
-      const canReenterNow = !token.lastSellTime || (now.getTime() - token.lastSellTime.getTime()) >= reentryCooldownMs;
-      
-      // Set lastSellPriceUSD to 0 for the first buy
-      if (typeof token.lastSellPriceUSD !== 'number' || !isFinite(token.lastSellPriceUSD)) {
-        token.lastSellPriceUSD = 0;
-      }
-      
       // Only buy if position is not open, under trade cap, and reentry is enabled (or first buy)
       const underTradeCap = currentTradeCount < maxTradesPerToken;
       const isFirstBuy = currentTradeCount === 0;
       const reentryAllowed = this.config.trading.reentryEnabled || isFirstBuy;
-      const canBuy = !token.positionOpen && underTradeCap && reentryAllowed && canReenterNow && currentPriceUSD >= lowBuy && currentPriceUSD > token.lastSellPriceUSD;
+      const canBuy = !token.positionOpen && underTradeCap && reentryAllowed && currentPriceUSD >= lowBuy && currentPriceUSD > token.lastSellPriceUSD;
       if (canBuy) {
-        // Prevent overlapping buys per token
-        if (this.activeBuyLocks.has(token.tokenAddress)) {
-          return;
-        }
-        
-        // Immediately set position as open to prevent race conditions
+        if (this.activeBuyLocks.has(token.tokenAddress)) return;
         token.positionOpen = true;
-        
-        console.log(`💰 BUY OPPORTUNITY: ${token.tokenAddress.slice(0, 8)}...`);
-        console.log(`   Price: $${currentPriceUSD.toFixed(8)} (threshold: $${lowBuy})`);
+        token.buyPriceUSD = currentPriceUSD;
+        token.peakPriceSinceLastSell = currentPriceUSD;
+        token.lastPriceChange = new Date();
         await this.withBuyLock(token.tokenAddress, async () => {
           await this.executeBuy(token);
         });
+        return;
       }
 
-      // Post-buy risk management and tiered selling
-      else if (token.positionOpen && !token.sellTransactionHash) {
-        // Prevent overlapping sells per token
-        if (this.activeSellLocks.has(token.tokenAddress)) {
-          return;
-        }
-        
-        // Initialize peak price since last sell (not buy price)
-        if (typeof token.peakPriceSinceLastSell !== 'number' || !isFinite(token.peakPriceSinceLastSell) || token.peakPriceSinceLastSell === 0) {
-          token.peakPriceSinceLastSell = token.buyPriceUSD || currentPriceUSD;
-          console.log(`🔄 Initialized peak price for ${token.tokenAddress.slice(0, 8)}... to $${token.peakPriceSinceLastSell.toFixed(8)}`);
-        }
-        
+      // Sell logic
+      if (token.positionOpen && !token.sellTransactionHash) {
         // Update peak price if current price is higher
-        if (currentPriceUSD > token.peakPriceSinceLastSell) {
-          const oldPeak = token.peakPriceSinceLastSell;
+        if (currentPriceUSD > (token.peakPriceSinceLastSell || 0)) {
           token.peakPriceSinceLastSell = currentPriceUSD;
-          console.log(`📈 New peak for ${token.tokenAddress.slice(0, 8)}...: $${oldPeak.toFixed(8)} → $${currentPriceUSD.toFixed(8)}`);
         }
-        
-        // Initialize other flags if missing
-        if (typeof token.hasSoldHalf !== 'boolean') token.hasSoldHalf = false;
-        if (typeof token.passedMiddle !== 'boolean') token.passedMiddle = false;
-        if (typeof token.wasAboveMiddle !== 'boolean') token.wasAboveMiddle = false;
-
-        // Take profit and stop loss logic based on peak price since last sell
-        const takeProfitPercent = Number(this.config.trading.takeProfitPercent) || 100;
-        const stopLossPercent = Number(this.config.trading.stopLossPercent) || 20;
-        
-        // Take profit: sell when price reaches peak * (1 + takeProfitPercent/100)
-        const takeProfitPrice = token.peakPriceSinceLastSell * (1 + takeProfitPercent / 100);
-        
-        // Stop loss: sell when price falls below peak * (1 - stopLossPercent/100)
-        const stopLossPrice = token.peakPriceSinceLastSell * (1 - stopLossPercent / 100);
-
-        console.log(`📊 ${token.tokenAddress.slice(0, 8)}... - Current: $${currentPriceUSD.toFixed(8)}, Peak: $${token.peakPriceSinceLastSell.toFixed(8)}, TakeProfit: $${takeProfitPrice.toFixed(8)}, StopLoss: $${stopLossPrice.toFixed(8)}`);
-
-        // Take profit
-        if (currentPriceUSD >= takeProfitPrice) {
-          console.log(`🎯 TAKE PROFIT: ${token.tokenAddress.slice(0, 8)}... at $${currentPriceUSD.toFixed(8)} (>= $${takeProfitPrice.toFixed(8)})`);
+        // Calculate thresholds
+        const firstSellPrice = token.buyPriceUSD * (1 + firstSellPercent / 100);
+        const secondSellPrice = token.buyPriceUSD * (1 + secondSellPercent / 100);
+        const stopLossPrice = token.peakPriceSinceLastSell * (1 - stopLossFromPeakPercent / 100);
+        // Sell half at first threshold
+        if (!token.hasSoldHalf && currentPriceUSD >= firstSellPrice) {
+          token.hasSoldHalf = true;
+          await this.withSellLock(token.tokenAddress, async () => {
+            await this.executeSell(token, { amountMode: 'half' });
+          });
+          return;
+        }
+        // Sell all at second threshold
+        if (currentPriceUSD >= secondSellPrice) {
           await this.withSellLock(token.tokenAddress, async () => {
             await this.executeSell(token, { amountMode: 'all' });
           });
           return;
         }
-        // Stop loss
+        // Stop loss from peak
         if (currentPriceUSD <= stopLossPrice) {
-          console.log(`🛑 STOP LOSS: ${token.tokenAddress.slice(0, 8)}... at $${currentPriceUSD.toFixed(8)} (<= $${stopLossPrice.toFixed(8)})`);
+          await this.withSellLock(token.tokenAddress, async () => {
+            await this.executeSell(token, { amountMode: 'all' });
+          });
+          return;
+        }
+        // Price stagnation: sell all if price hasn't changed for more than 30 seconds
+        if (token.lastPriceChange && (now.getTime() - token.lastPriceChange.getTime()) / 1000 > priceStagnationTimeoutSeconds) {
           await this.withSellLock(token.tokenAddress, async () => {
             await this.executeSell(token, { amountMode: 'all' });
           });
           return;
         }
       }
-
     } catch (error) {
       console.error(`Error checking trading opportunities for token ${token.tokenAddress}:`, error.message);
     }
