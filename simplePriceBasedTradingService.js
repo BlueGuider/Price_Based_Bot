@@ -808,6 +808,7 @@ class SimplePriceBasedTradingService {
 
       // Check if we're already monitoring this token
       if (this.monitoredTokens.has(tokenAddress)) {
+        console.log(`🚫 Token ${tokenAddress.slice(0, 8)}... already being monitored`);
         return;
       }
 
@@ -858,7 +859,9 @@ class SimplePriceBasedTradingService {
         hasSoldHalf: false,
         buyTransactionHash: null,
         sellTransactionHash: null,
-        hasBeenTraded: false
+        hasBeenTraded: false,
+        buyAttempts: 0, // Track buy attempts to prevent infinite retries
+        sellAttempts: 0 // Track sell attempts
       };
 
       this.monitoredTokens.set(tokenAddress, monitoredToken);
@@ -989,12 +992,14 @@ class SimplePriceBasedTradingService {
       if (shouldBuy(token, token.matchedPattern, this.config)) {
         // Prevent duplicate buys with lock
         if (this.activeBuyLocks.has(token.tokenAddress)) {
+          console.log(`🔒 Buy already in progress for ${token.tokenAddress.slice(0, 8)}...`);
           return;
         }
         
         await this.withBuyLock(token.tokenAddress, async () => {
           // Double-check conditions inside lock
           if (shouldBuy(token, token.matchedPattern, this.config)) {
+            console.log(`🛒 Executing buy for ${token.tokenAddress.slice(0, 8)}... at $${token.currentPriceUSD.toFixed(8)}`);
             token.positionOpen = true;
             token.buyPriceUSD = token.currentPriceUSD;
             token.peakPriceSinceLastSell = token.currentPriceUSD;
@@ -1009,6 +1014,11 @@ class SimplePriceBasedTradingService {
             
             // Restore original buy amount
             this.config.trading.buyAmountBNB = originalBuyAmount;
+            
+            // Add small delay to prevent rapid-fire buying
+            await new Promise(resolve => setTimeout(resolve, 1000));
+          } else {
+            console.log(`🚫 Buy conditions no longer met for ${token.tokenAddress.slice(0, 8)}...`);
           }
         });
         return;
@@ -1019,6 +1029,7 @@ class SimplePriceBasedTradingService {
       if (sellDecision && sellDecision.shouldSell) {
         // Prevent duplicate sells with lock
         if (this.activeSellLocks.has(token.tokenAddress)) {
+          console.log(`🔒 Sell already in progress for ${token.tokenAddress.slice(0, 8)}...`);
           return;
         }
         
@@ -1028,6 +1039,8 @@ class SimplePriceBasedTradingService {
           if (currentSellDecision && currentSellDecision.shouldSell) {
             console.log(`📈 Sell triggered for ${token.tokenAddress.slice(0, 8)}...: ${currentSellDecision.reason}`);
             await this.executeSell(token, { amountMode: currentSellDecision.amountMode });
+          } else {
+            console.log(`🚫 Sell conditions no longer met for ${token.tokenAddress.slice(0, 8)}...`);
           }
         });
         return;
@@ -1043,6 +1056,9 @@ class SimplePriceBasedTradingService {
    */
   async executeBuy(token) {
     try {
+      // Increment buy attempts counter
+      token.buyAttempts = (token.buyAttempts || 0) + 1;
+      
       // Guard: respect per-token trade cap before placing any buy
       const maxTradesPerToken = Number(this.config.trading.maxTradesPerCycle ?? 2);
       const currentTradeCount = Number(token.tradeCount || 0);
@@ -1107,10 +1123,13 @@ class SimplePriceBasedTradingService {
 
         console.log(`✅ REAL buy completed for ${token.tokenAddress.slice(0, 8)}...`);
         console.log(`   Transaction: ${buyResult.transactionHash}`);
+        console.log(`   Position: OPEN at $${token.buyPriceUSD.toFixed(8)}`);
       } else {
         console.log(`❌ Buy failed for ${token.tokenAddress.slice(0, 8)}...: ${buyResult.error}`);
         // Reset position if buy failed
         token.positionOpen = false;
+        token.buyPriceUSD = 0;
+        token.buyTransactionHash = null;
       }
 
     } catch (error) {
@@ -1320,8 +1339,10 @@ class SimplePriceBasedTradingService {
       for (const wallet of fundedWallets) {
         try {
           const walletClient = this.createWalletClient(wallet.address);
+          // Get fresh nonce for each transaction
           const nonce = await this.publicClient.getTransactionCount({
-            address: wallet.address
+            address: wallet.address,
+            blockTag: 'pending' // Use pending to get the latest nonce
           });
           const gasPrice = await this.getCurrentGasPrice();
 
@@ -1406,6 +1427,9 @@ class SimplePriceBasedTradingService {
       }
 
       if (walletsWithToken.length === 0) {
+        console.log(`⚠️ No tokens to sell for ${token.tokenAddress.slice(0, 8)}... - position may already be closed`);
+        // Mark position as closed if no tokens found
+        token.positionOpen = false;
         return { success: false, error: 'No wallets have tokens to sell' };
       }
 
@@ -1444,8 +1468,10 @@ class SimplePriceBasedTradingService {
       for (const wallet of walletsWithToken) {
         try {
           const walletClient = this.createWalletClient(wallet.address);
+          // Get fresh nonce for each transaction
           let nonce = await this.publicClient.getTransactionCount({
-            address: wallet.address
+            address: wallet.address,
+            blockTag: 'pending' // Use pending to get the latest nonce
           });
           const gasPrice = await this.getCurrentGasPrice();
 

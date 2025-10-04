@@ -17,6 +17,12 @@ function shouldBuy(token, pattern, config) {
     return false;
   }
   
+  // Prevent too many buy attempts
+  const maxBuyAttempts = 3;
+  if (token.buyAttempts >= maxBuyAttempts) {
+    return false;
+  }
+  
   // Only buy if:
   // 1. Price is above buy threshold
   // 2. Position is not already open
