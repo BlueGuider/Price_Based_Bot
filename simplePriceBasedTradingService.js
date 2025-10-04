@@ -1309,10 +1309,17 @@ class SimplePriceBasedTradingService {
       );
 
       if (fundedWallets.length === 0) {
+        console.log(`❌ No funded wallets available. Available wallets: ${this.availableWallets.length}`);
+        this.availableWallets.forEach((wallet, index) => {
+          console.log(`   ${index + 1}. ${wallet.address.slice(0, 8)}... - ${wallet.balanceBNB} BNB`);
+        });
         return { success: false, error: 'No funded wallets available' };
       }
 
       console.log(`💰 Using ${fundedWallets.length} funded wallets for buy`);
+      fundedWallets.forEach((wallet, index) => {
+        console.log(`   ${index + 1}. ${wallet.address.slice(0, 8)}... - ${wallet.balanceBNB} BNB`);
+      });
 
       // Check if token is migrated to PancakeSwap
       const isMigrated = await this.isTokenMigrated(token.tokenAddress);
@@ -1338,7 +1345,14 @@ class SimplePriceBasedTradingService {
 
       for (const wallet of fundedWallets) {
         try {
+          console.log(`🔑 Creating wallet client for ${wallet.address.slice(0, 8)}...`);
           const walletClient = this.createWalletClient(wallet.address);
+          
+          if (!walletClient) {
+            console.log(`❌ Failed to create wallet client for ${wallet.address.slice(0, 8)}...`);
+            continue;
+          }
+          
           // Get fresh nonce for each transaction
           const nonce = await this.publicClient.getTransactionCount({
             address: wallet.address,
@@ -1386,9 +1400,11 @@ class SimplePriceBasedTradingService {
 
           // Update wallet last used
           this.updateWalletLastUsed(wallet.address);
+          
+          console.log(`✅ Buy transaction submitted for ${wallet.address.slice(0, 8)}...: ${txHash}`);
 
         } catch (error) {
-          console.error(`Error preparing buy transaction for wallet ${wallet.address}:`, error);
+          console.error(`❌ Error preparing buy transaction for wallet ${wallet.address.slice(0, 8)}...:`, error.message);
         }
       }
 
@@ -1782,18 +1798,33 @@ class SimplePriceBasedTradingService {
    * Create wallet client for transaction signing
    */
   createWalletClient(address) {
-    const wallet = this.availableWallets.find(w => w.address.toLowerCase() === address.toLowerCase());
-    if (!wallet) {
-      throw new Error('Wallet not found');
-    }
-
     try {
+      const wallet = this.availableWallets.find(w => w.address.toLowerCase() === address.toLowerCase());
+      if (!wallet) {
+        console.log(`❌ Wallet not found in available wallets: ${address.slice(0, 8)}...`);
+        return null;
+      }
+
+      if (!wallet.encryptedPrivateKey) {
+        console.log(`❌ No encrypted private key found for wallet: ${address.slice(0, 8)}...`);
+        return null;
+      }
+
       // Decrypt the private key
       const privateKey = SimpleSecurityUtils.decrypt(wallet.encryptedPrivateKey);
+      if (!privateKey || !privateKey.startsWith('0x')) {
+        console.log(`❌ Invalid private key decrypted for wallet: ${address.slice(0, 8)}...`);
+        return null;
+      }
+
       const account = privateKeyToAccount(privateKey);
-      return createWalletClient({ account, chain: bsc, transport: this.transport });
+      const walletClient = createWalletClient({ account, chain: bsc, transport: this.transport });
+      
+      console.log(`✅ Wallet client created successfully for ${address.slice(0, 8)}...`);
+      return walletClient;
     } catch (error) {
-      throw new Error(`Failed to decrypt private key for wallet ${address}: ${error.message}`);
+      console.log(`❌ Failed to create wallet client for ${address.slice(0, 8)}...: ${error.message}`);
+      return null;
     }
   }
 
