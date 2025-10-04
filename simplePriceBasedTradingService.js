@@ -91,7 +91,7 @@ class SimplePriceBasedTradingService {
       tokensTraded: 0
     };
     this.FOUR_MEME_CONTRACT = '0x5c952063c7fc8610ffdb798152d69f0b9550762b';
-    this.SCAN_INTERVAL = 300; // 500ms for fast detection
+    this.SCAN_INTERVAL = 200; // 200ms for faster detection
     this.MAX_BLOCKS_PER_SCAN = 1;
     this.lastProcessedBlock = 0;
     this.scanningInterval = null;

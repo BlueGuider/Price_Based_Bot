@@ -71,6 +71,11 @@ function shouldSell(token, pattern, config) {
   const timeSinceBuy = token.buyTime ? (now.getTime() - token.buyTime.getTime()) / 1000 : 0;
   const minHoldTime = tradingParams.holdTimeSeconds || 0;
   
+  // Debug logging
+  if (timeSinceBuy < minHoldTime) {
+    console.log(`⏰ Hold time not met for ${token.tokenAddress.slice(0, 8)}...: ${timeSinceBuy.toFixed(1)}s < ${minHoldTime}s`);
+  }
+  
   // Check sell conditions
   const sellConditions = {
     firstSell: !token.hasSoldHalf && currentPriceUSD >= firstSellPrice && timeSinceBuy >= minHoldTime,
