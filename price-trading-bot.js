@@ -91,22 +91,41 @@ class PriceTradingBot {
    */
   displayConfiguration() {
     const config = this.tradingService.getConfig();
+    const monitoredTokens = this.tradingService.getMonitoredTokens();
     
     console.log('📊 Current Configuration:');
     console.log(`   Trading Enabled: ${config.trading.enabled ? 'YES' : 'NO'}`);
     console.log(`   Test Mode: ${config.trading.testMode ? 'ON' : 'OFF'}`);
-    console.log(`   Low Threshold: $${config.trading.lowThresholdUSD}`);
-    console.log(`   High Threshold: $${config.trading.highThresholdUSD}`);
-    const migrationPriceUSD = config.trading.migrationPriceBNB * 1000; // Approximate BNB price
-    console.log(`   Migration Price: $${migrationPriceUSD.toFixed(8)}`);
-    console.log(`   Buy Amount: ${config.trading.buyAmountBNB} BNB`);
-    console.log(`   Max Buy Amount: ${config.trading.maxBuyAmountBNB} BNB`);
+    console.log(`   Re-entry Enabled: ${config.trading.reentryEnabled ? 'YES' : 'NO'}`);
+    console.log(`   Max Trades Per Token: ${config.trading.maxTradesPerCycle ?? 2}`);
     console.log(`   Update Interval: ${config.monitoring.updateIntervalMs}ms`);
     console.log(`   Inactive Timeout: ${config.monitoring.inactiveTimeoutMinutes} minutes`);
     console.log(`   Max Concurrent Tokens: ${config.monitoring.maxConcurrentTokens}`);
     console.log(`   Max Trades/Hour: ${config.safety.maxTradesPerHour}`);
     console.log(`   Max Trades/Day: ${config.safety.maxTradesPerDay}`);
     console.log('');
+    
+    // Show pattern usage statistics
+    const patternStats = {};
+    monitoredTokens.forEach(token => {
+      if (token.matchedPattern) {
+        const patternName = token.matchedPattern.name;
+        if (!patternStats[patternName]) {
+          patternStats[patternName] = { total: 0, traded: 0, active: 0 };
+        }
+        patternStats[patternName].total++;
+        if (token.hasBeenTraded) patternStats[patternName].traded++;
+        if (token.isActive) patternStats[patternName].active++;
+      }
+    });
+    
+    if (Object.keys(patternStats).length > 0) {
+      console.log('🎯 Pattern Usage Statistics:');
+      Object.entries(patternStats).forEach(([patternName, stats]) => {
+        console.log(`   ${patternName}: ${stats.active} active, ${stats.traded} traded, ${stats.total} total`);
+      });
+      console.log('');
+    }
   }
 
   /**
@@ -147,7 +166,9 @@ class PriceTradingBot {
         const priceChangeEmoji = token.priceChangePercent > 0 ? '📈' : 
                                 token.priceChangePercent < 0 ? '📉' : '➡️';
         const tradedStatus = token.hasBeenTraded ? '✅' : '⏳';
-        console.log(`   ${tradedStatus} ${token.tokenAddress.slice(0, 8)}... $${token.currentPriceUSD.toFixed(8)} ${priceChangeEmoji} ${token.priceChangePercent > 0 ? '+' : ''}${token.priceChangePercent.toFixed(2)}%`);
+        const patternName = token.matchedPattern ? token.matchedPattern.name : 'Unknown';
+        const positionStatus = token.positionOpen ? '🟢' : '⚪';
+        console.log(`   ${tradedStatus} ${positionStatus} ${token.tokenAddress.slice(0, 8)}... $${token.currentPriceUSD.toFixed(8)} ${priceChangeEmoji} ${token.priceChangePercent > 0 ? '+' : ''}${token.priceChangePercent.toFixed(2)}% (${patternName})`);
       });
     }
     

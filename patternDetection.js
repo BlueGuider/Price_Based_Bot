@@ -17,13 +17,28 @@ function loadPatterns() {
 
 function matchPattern(tokenCreation, patterns) {
   if (!patterns || patterns.length === 0) return null;
-  return patterns.find(pattern => {
-    return (
-      tokenCreation.gasPriceGwei >= pattern.gasPrice.min &&
-      tokenCreation.gasPriceGwei <= pattern.gasPrice.max &&
-      tokenCreation.gasLimit >= pattern.gasLimit.min &&
-      tokenCreation.gasLimit <= pattern.gasLimit.max
-    );
+  
+  // Sort patterns by priority (lower number = higher priority)
+  const sortedPatterns = patterns.sort((a, b) => (a.priority || 10) - (b.priority || 10));
+  
+  return sortedPatterns.find(pattern => {
+    // Check if pattern is enabled
+    if (!pattern.enabled) return false;
+    
+    // Match gas price (convert to gwei if needed)
+    const gasPriceGwei = tokenCreation.gasPriceGwei;
+    const gasPriceMin = pattern.gasPrice.min;
+    const gasPriceMax = pattern.gasPrice.max;
+    
+    // Match gas limit
+    const gasLimit = tokenCreation.gasLimit;
+    const gasLimitMin = pattern.gasLimit.min;
+    const gasLimitMax = pattern.gasLimit.max;
+    
+    const gasPriceMatch = gasPriceGwei >= gasPriceMin && gasPriceGwei <= gasPriceMax;
+    const gasLimitMatch = gasLimit >= gasLimitMin && gasLimit <= gasLimitMax;
+    
+    return gasPriceMatch && gasLimitMatch;
   }) || null;
 }
 

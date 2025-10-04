@@ -13,7 +13,7 @@ const {
   PANCAKESWAP_V2_ROUTER_ABI
 } = require('./abis');
 const { loadPatterns, matchPattern } = require('./patternDetection');
-const { shouldBuy, shouldSell } = require('./tradingLogic');
+const { shouldBuy, shouldSell, getTradingParams } = require('./tradingLogic');
 const { loadWallets } = require('./walletUtils');
 const { loadConfig, saveConfig } = require('./config');
 
@@ -570,14 +570,28 @@ class SimplePriceBasedTradingService {
     try {
       console.log('🚀 Starting Price-Based Trading System...');
       console.log(`📊 Configuration:`);
-      console.log(`   Low Threshold: $${this.config.trading.lowThresholdUSD}`);
-      console.log(`   High Threshold: $${this.config.trading.highThresholdUSD}`);
-      const migrationPriceUSD = this.config.trading.migrationPriceBNB * this.bnbPriceUSD;
-      console.log(`   Migration Price: $${migrationPriceUSD.toFixed(8)}`);
-      console.log(`   Buy Amount: ${this.config.trading.buyAmountBNB} BNB`);
+      console.log(`   Patterns Loaded: ${this.patterns.length}`);
       console.log(`   Test Mode: ${this.config.trading.testMode ? 'ON' : 'OFF'}`);
       console.log(`   Wallets: ${this.availableWallets.length}`);
+      console.log(`   Re-entry Enabled: ${this.config.trading.reentryEnabled ? 'YES' : 'NO'}`);
+      console.log(`   Max Trades Per Token: ${this.config.trading.maxTradesPerCycle ?? 2}`);
       console.log('');
+      
+      // Display pattern configurations
+      console.log('🎯 Pattern Configurations:');
+      this.patterns.forEach((pattern, index) => {
+        console.log(`   ${index + 1}. ${pattern.name} (${pattern.enabled ? 'ENABLED' : 'DISABLED'})`);
+        console.log(`      Gas Price: ${pattern.gasPrice.min}-${pattern.gasPrice.max} Gwei`);
+        console.log(`      Gas Limit: ${pattern.gasLimit.min}-${pattern.gasLimit.max}`);
+        console.log(`      Buy Threshold: $${pattern.trading.buyPriceThresholdUSD}`);
+        console.log(`      Buy Amount: ${pattern.trading.buyAmount} BNB`);
+        console.log(`      Buy Delay: ${pattern.trading.buyDelaySeconds}s`);
+        console.log(`      Hold Time: ${pattern.trading.holdTimeSeconds}s`);
+        console.log(`      First Sell: ${pattern.trading.firstSellThresholdPercent}%`);
+        console.log(`      Second Sell: ${pattern.trading.secondSellThresholdPercent}%`);
+        console.log(`      Stop Loss: ${pattern.trading.stopLossFromPeakPercent}%`);
+        console.log('');
+      });
 
       // Start token creation scanning
       await this.startTokenScanning();
@@ -837,7 +851,14 @@ class SimplePriceBasedTradingService {
         hasCompletedFirstCycle: false,
         lastSellTime: null,
         lastSellAttemptAt: null,
-        lowPriceSince: null
+        lowPriceSince: null,
+        matchedPattern: matchedPattern, // Store the matched pattern for trading decisions
+        buyPriceUSD: 0,
+        sellPriceUSD: 0,
+        hasSoldHalf: false,
+        buyTransactionHash: null,
+        sellTransactionHash: null,
+        hasBeenTraded: false
       };
 
       this.monitoredTokens.set(tokenAddress, monitoredToken);
@@ -955,80 +976,63 @@ class SimplePriceBasedTradingService {
   }
 
   /**
-   * Check for trading opportunities
+   * Check for trading opportunities using pattern-based logic
    */
   async checkTradingOpportunities(token) {
     try {
-      const currentPriceUSD = token.currentPriceUSD;
-      const now = new Date();
-      const maxTradesPerToken = Number(this.config.trading.maxTradesPerCycle ?? 2);
-      const currentTradeCount = Number(token.tradeCount || 0);
-      const isReentryCycle = !!token.hasCompletedFirstCycle;
-      const lowBuy = isReentryCycle ? (this.config.trading.reentryLowThresholdUSD ?? this.config.trading.lowThresholdUSD)
-        : this.config.trading.lowThresholdUSD;
-      // Use sell thresholds from config or pattern (if available)
-      const firstSellPercent = 20.0;
-      const secondSellPercent = 50.0;
-      const stopLossFromPeakPercent = 15.0;
-      const priceStagnationTimeoutSeconds = 30;
+      // Skip if no pattern matched
+      if (!token.matchedPattern) {
+        return;
+      }
 
-      // Only buy if position is not open, under trade cap, and reentry is enabled (or first buy)
-      const underTradeCap = currentTradeCount < maxTradesPerToken;
-      const isFirstBuy = currentTradeCount === 0;
-      const reentryAllowed = this.config.trading.reentryEnabled || isFirstBuy;
-      const canBuy = !token.positionOpen && underTradeCap && reentryAllowed && currentPriceUSD >= lowBuy && currentPriceUSD > token.lastSellPriceUSD;
-      if (canBuy) {
-        if (this.activeBuyLocks.has(token.tokenAddress)) return;
-        token.positionOpen = true;
-        token.buyPriceUSD = currentPriceUSD;
-        token.peakPriceSinceLastSell = currentPriceUSD;
-        token.lastPriceChange = new Date();
+      // Check for buy opportunity
+      if (shouldBuy(token, token.matchedPattern, this.config)) {
+        // Prevent duplicate buys with lock
+        if (this.activeBuyLocks.has(token.tokenAddress)) {
+          return;
+        }
+        
         await this.withBuyLock(token.tokenAddress, async () => {
-          await this.executeBuy(token);
+          // Double-check conditions inside lock
+          if (shouldBuy(token, token.matchedPattern, this.config)) {
+            token.positionOpen = true;
+            token.buyPriceUSD = token.currentPriceUSD;
+            token.peakPriceSinceLastSell = token.currentPriceUSD;
+            token.lastPriceChange = new Date();
+            
+            // Use pattern-based buy amount
+            const tradingParams = getTradingParams(token.matchedPattern);
+            const originalBuyAmount = this.config.trading.buyAmountBNB;
+            this.config.trading.buyAmountBNB = tradingParams.buyAmount;
+            
+            await this.executeBuy(token);
+            
+            // Restore original buy amount
+            this.config.trading.buyAmountBNB = originalBuyAmount;
+          }
         });
         return;
       }
 
-      // Sell logic
-      if (token.positionOpen && !token.sellTransactionHash) {
-        // Update peak price if current price is higher
-        if (currentPriceUSD > (token.peakPriceSinceLastSell || 0)) {
-          token.peakPriceSinceLastSell = currentPriceUSD;
-        }
-        // Calculate thresholds
-        const firstSellPrice = token.buyPriceUSD * (1 + firstSellPercent / 100);
-        const secondSellPrice = token.buyPriceUSD * (1 + secondSellPercent / 100);
-        const stopLossPrice = token.peakPriceSinceLastSell * (1 - stopLossFromPeakPercent / 100);
-        // Sell half at first threshold
-        if (!token.hasSoldHalf && currentPriceUSD >= firstSellPrice) {
-          token.hasSoldHalf = true;
-          await this.withSellLock(token.tokenAddress, async () => {
-            await this.executeSell(token, { amountMode: 'half' });
-          });
+      // Check for sell opportunity
+      const sellDecision = shouldSell(token, token.matchedPattern, this.config);
+      if (sellDecision && sellDecision.shouldSell) {
+        // Prevent duplicate sells with lock
+        if (this.activeSellLocks.has(token.tokenAddress)) {
           return;
         }
-        // Sell all at second threshold
-        if (currentPriceUSD >= secondSellPrice) {
-          await this.withSellLock(token.tokenAddress, async () => {
-            await this.executeSell(token, { amountMode: 'all' });
-          });
-          return;
-        }
-        // Stop loss from peak
-        if (currentPriceUSD <= stopLossPrice) {
-          await this.withSellLock(token.tokenAddress, async () => {
-            await this.executeSell(token, { amountMode: 'all' });
-          });
-          return;
-        }
-        // Price stagnation: sell all if price hasn't changed for more than 30 seconds
-        if (token.lastPriceChange && (now.getTime() - token.lastPriceChange.getTime()) / 1000 > priceStagnationTimeoutSeconds) {
-          await this.withSellLock(token.tokenAddress, async () => {
-            await this.executeSell(token, { amountMode: 'all' });
-          });
-          return;
-        }
+        
+        await this.withSellLock(token.tokenAddress, async () => {
+          // Double-check conditions inside lock
+          const currentSellDecision = shouldSell(token, token.matchedPattern, this.config);
+          if (currentSellDecision && currentSellDecision.shouldSell) {
+            console.log(`📈 Sell triggered for ${token.tokenAddress.slice(0, 8)}...: ${currentSellDecision.reason}`);
+            await this.executeSell(token, { amountMode: currentSellDecision.amountMode });
+          }
+        });
+        return;
       }
+
     } catch (error) {
       console.error(`Error checking trading opportunities for token ${token.tokenAddress}:`, error.message);
     }
@@ -1043,33 +1047,51 @@ class SimplePriceBasedTradingService {
       const maxTradesPerToken = Number(this.config.trading.maxTradesPerCycle ?? 2);
       const currentTradeCount = Number(token.tradeCount || 0);
       if (currentTradeCount >= maxTradesPerToken) {
+        console.log(`🚫 Trade limit reached for ${token.tokenAddress.slice(0, 8)}... (${currentTradeCount}/${maxTradesPerToken})`);
+        return;
+      }
+
+      // Get pattern-based trading parameters
+      const tradingParams = getTradingParams(token.matchedPattern);
+      if (!tradingParams) {
+        console.log(`❌ No trading parameters found for pattern`);
         return;
       }
 
       if (this.config.trading.testMode) {
-        console.log(`🧪 TEST MODE: Would buy ${token.tokenAddress.slice(0, 8)}... for ${this.config.trading.buyAmountBNB} BNB`);
+        console.log(`🧪 TEST MODE: Would buy ${token.tokenAddress.slice(0, 8)}...`);
+        console.log(`   Pattern: ${token.matchedPattern.name}`);
+        console.log(`   Buy Amount: ${tradingParams.buyAmount} BNB`);
+        console.log(`   Buy Threshold: $${tradingParams.buyPriceThresholdUSD}`);
+        console.log(`   Current Price: $${token.currentPriceUSD.toFixed(8)}`);
+        
         token.hasBeenTraded = true;
         token.buyPriceUSD = token.currentPriceUSD;
         token.buyTransactionHash = 'TEST_BUY_' + Date.now();
         // Initialize risk management flags
         token.peakPriceSinceLastSell = token.buyPriceUSD; // Reset peak to buy price
         token.hasSoldHalf = false;
-        token.passedMiddle = false;
-        token.wasAboveMiddle = token.currentPriceUSD >= (this.config.trading.middleSellThresholdUSD ?? this.config.trading.highThresholdUSD);
-        token.lastCrossAboveMiddleAt = token.wasAboveMiddle ? new Date() : null;
-        token.lastCrossBelowMiddleAt = !token.wasAboveMiddle ? new Date() : null;
         token.buyTime = new Date();
         this.tradeStats.successfulBuys++;
+        this.tradeStats.totalTrades++;
         // positionOpen already set above
         return;
       }
 
       console.log(`🔄 Executing REAL buy order for ${token.tokenAddress.slice(0, 8)}...`);
-      console.log(`   Amount: ${this.config.trading.buyAmountBNB} BNB`);
+      console.log(`   Pattern: ${token.matchedPattern.name}`);
+      console.log(`   Amount: ${tradingParams.buyAmount} BNB`);
       console.log(`   Price: $${token.currentPriceUSD.toFixed(8)}`);
+
+      // Temporarily update config with pattern-based buy amount
+      const originalBuyAmount = this.config.trading.buyAmountBNB;
+      this.config.trading.buyAmountBNB = tradingParams.buyAmount;
 
       // Execute real buy transaction
       const buyResult = await this.executeRealBuy(token);
+
+      // Restore original buy amount
+      this.config.trading.buyAmountBNB = originalBuyAmount;
 
       if (buyResult.success) {
         token.hasBeenTraded = true;
@@ -1078,10 +1100,6 @@ class SimplePriceBasedTradingService {
         // Initialize risk management flags
         token.peakPriceSinceLastSell = token.buyPriceUSD; // Reset peak to buy price
         token.hasSoldHalf = false;
-        token.passedMiddle = false;
-        token.wasAboveMiddle = token.currentPriceUSD >= (this.config.trading.middleSellThresholdUSD ?? this.config.trading.highThresholdUSD);
-        token.lastCrossAboveMiddleAt = token.wasAboveMiddle ? new Date() : null;
-        token.lastCrossBelowMiddleAt = !token.wasAboveMiddle ? new Date() : null;
         token.buyTime = new Date();
         this.tradeStats.successfulBuys++;
         this.tradeStats.totalTrades++;
@@ -1108,6 +1126,7 @@ class SimplePriceBasedTradingService {
   async executeSell(token, options = { amountMode: 'all' }) {
     try {
       const amountMode = options.amountMode || 'all';
+      
       // Cooldown after any sell attempt to avoid rapid re-triggers
       const cooldownMs = Math.max(0, Number(this.config.trading.sellCooldownSeconds || 0) * 1000);
       const now = new Date();
@@ -1115,15 +1134,35 @@ class SimplePriceBasedTradingService {
         return;
       }
       token.lastSellAttemptAt = now;
+
+      // Get pattern-based trading parameters
+      const tradingParams = getTradingParams(token.matchedPattern);
+      if (!tradingParams) {
+        console.log(`❌ No trading parameters found for pattern`);
+        return;
+      }
+
       if (this.config.trading.testMode) {
         const note = amountMode === 'half' ? 'half (TEST)' : 'all (TEST)';
         console.log(`🧪 TEST MODE: Would sell ${note} for ${token.tokenAddress.slice(0, 8)}...`);
+        console.log(`   Pattern: ${token.matchedPattern.name}`);
+        console.log(`   Sell Price: $${token.currentPriceUSD.toFixed(8)}`);
+        console.log(`   Buy Price: $${token.buyPriceUSD.toFixed(8)}`);
+        
         token.sellPriceUSD = token.currentPriceUSD;
         if (amountMode === 'all') {
           token.sellTransactionHash = 'TEST_SELL_' + Date.now();
           this.tradeStats.successfulSells++;
           token.positionOpen = false;
           token.lastSellPriceUSD = token.currentPriceUSD;
+          
+          // Calculate profit/loss
+          if (token.buyPriceUSD) {
+            const profitLossUSD = token.sellPriceUSD - token.buyPriceUSD;
+            this.tradeStats.totalProfitUSD += profitLossUSD;
+            console.log(`💰 Test Trade P&L: $${profitLossUSD.toFixed(8)}`);
+          }
+          
           // Re-entry handling in test mode
           const maxTradesPerToken = Number(this.config.trading.maxTradesPerCycle ?? 2);
           const currentTradeCount = Number(token.tradeCount || 0);
@@ -1137,8 +1176,6 @@ class SimplePriceBasedTradingService {
             token.buyPriceUSD = 0;
             token.peakPriceSinceLastSell = 0; // Reset peak price for re-entry
             token.hasSoldHalf = false;
-            token.passedMiddle = false;
-            token.wasAboveMiddle = false;
             token.sellTransactionHash = undefined;
           } else {
             // Mark token as traded and remove from monitoring
@@ -1154,7 +1191,9 @@ class SimplePriceBasedTradingService {
       }
 
       console.log(`🔄 Executing REAL sell order (${amountMode}) for ${token.tokenAddress.slice(0, 8)}...`);
-      console.log(`   Price: $${token.currentPriceUSD.toFixed(8)}`);
+      console.log(`   Pattern: ${token.matchedPattern.name}`);
+      console.log(`   Sell Price: $${token.currentPriceUSD.toFixed(8)}`);
+      console.log(`   Buy Price: $${token.buyPriceUSD.toFixed(8)}`);
 
       // Execute real sell transaction
       const sellResult = await this.executeRealSell(token, { amountMode });
@@ -1191,8 +1230,6 @@ class SimplePriceBasedTradingService {
             token.buyPriceUSD = 0;
             token.peakPriceSinceLastSell = 0; // Reset peak price for re-entry
             token.hasSoldHalf = false;
-            token.passedMiddle = false;
-            token.wasAboveMiddle = false;
             token.sellTransactionHash = undefined;
           } else {
             // Mark token as traded and remove from monitoring
