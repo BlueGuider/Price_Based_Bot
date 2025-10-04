@@ -354,6 +354,12 @@ class SimplePriceBasedTradingService {
         const walletsWithBalances = await Promise.all(
           walletsData.map(async (wallet) => {
             try {
+              // Check if wallet has required fields
+              if (!wallet.address || !wallet.encryptedPrivateKey) {
+                console.log(`⚠️ Skipping wallet with missing data: ${wallet.address || 'unknown'}`);
+                return null;
+              }
+              
               const balance = await this.getWalletBalance(wallet.address);
               return {
                 address: wallet.address,
@@ -374,9 +380,12 @@ class SimplePriceBasedTradingService {
             }
           })
         );
+        
+        // Filter out null wallets
+        const validWallets = walletsWithBalances.filter(wallet => wallet !== null);
 
         // Sort wallets by balance (highest first) to prioritize funded wallets
-        const sortedWallets = walletsWithBalances.sort((a, b) => b.balanceBNB - a.balanceBNB);
+        const sortedWallets = validWallets.sort((a, b) => b.balanceBNB - a.balanceBNB);
 
         this.availableWallets = sortedWallets;
         console.log(`💰 Loaded ${this.availableWallets.length} wallets for trading`);
@@ -1385,6 +1394,11 @@ class SimplePriceBasedTradingService {
           }
 
           // Send transaction directly
+          if (!walletClient.account) {
+            console.log(`❌ Wallet client account is undefined for ${wallet.address.slice(0, 8)}...`);
+            continue;
+          }
+          
           const txHash = await walletClient.sendTransaction({
             account: walletClient.account,
             to: buyParams.data.tokenManager,
@@ -1819,6 +1833,11 @@ class SimplePriceBasedTradingService {
 
       const account = privateKeyToAccount(privateKey);
       const walletClient = createWalletClient({ account, chain: bsc, transport: this.transport });
+      
+      if (!walletClient || !walletClient.account) {
+        console.log(`❌ Wallet client created but account is undefined for ${address.slice(0, 8)}...`);
+        return null;
+      }
       
       console.log(`✅ Wallet client created successfully for ${address.slice(0, 8)}...`);
       return walletClient;
