@@ -1362,6 +1362,24 @@ class SimplePriceBasedTradingService {
             continue;
           }
           
+          // Check if wallet already has tokens to prevent duplicate buys
+          try {
+            const tokenBalance = await this.publicClient.readContract({
+              address: token.tokenAddress,
+              abi: this.ERC20_ABI,
+              functionName: 'balanceOf',
+              args: [wallet.address]
+            });
+            
+            if (tokenBalance > 0n) {
+              console.log(`⚠️ Wallet ${wallet.address.slice(0, 8)}... already has ${tokenBalance.toString()} tokens, skipping buy`);
+              continue;
+            }
+          } catch (error) {
+            console.log(`⚠️ Could not check token balance for ${wallet.address.slice(0, 8)}...: ${error.message}`);
+            // Continue with buy attempt if balance check fails
+          }
+          
           // Get fresh nonce for each transaction
           const nonce = await this.publicClient.getTransactionCount({
             address: wallet.address,
