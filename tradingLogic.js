@@ -6,7 +6,16 @@ function shouldBuy(token, pattern, config) {
   }
 
   const currentPriceUSD = token.currentPriceUSD;
-  const buyThreshold = pattern.trading.buyThresholdUSD;
+  const buyThreshold = pattern.trading.buyPriceThresholdUSD;
+  
+  // Check buy delay - don't buy immediately after token creation
+  const now = new Date();
+  const timeSinceCreation = (now.getTime() - token.creationTime.getTime()) / 1000;
+  const buyDelaySeconds = pattern.trading.buyDelaySeconds || 0;
+  
+  if (timeSinceCreation < buyDelaySeconds) {
+    return false;
+  }
   
   // Only buy if:
   // 1. Price is above buy threshold
@@ -47,18 +56,24 @@ function shouldSell(token, pattern, config) {
 
   const tradingParams = pattern.trading;
   
-  // Calculate sell thresholds
-  const firstSellPrice = buyPriceUSD * (1 + tradingParams.firstSellPercent / 100);
-  const secondSellPrice = buyPriceUSD * (1 + tradingParams.secondSellPercent / 100);
+  // Calculate sell thresholds using your pattern format
+  const firstSellPrice = buyPriceUSD * (1 + tradingParams.firstSellThresholdPercent / 100);
+  const secondSellPrice = buyPriceUSD * (1 + tradingParams.secondSellThresholdPercent / 100);
   const stopLossPrice = token.peakPriceSinceLastSell * (1 - tradingParams.stopLossFromPeakPercent / 100);
+  
+  // Check hold time - don't sell too quickly
+  const timeSinceBuy = token.buyTime ? (now.getTime() - token.buyTime.getTime()) / 1000 : 0;
+  const minHoldTime = tradingParams.holdTimeSeconds || 0;
   
   // Check sell conditions
   const sellConditions = {
-    firstSell: !token.hasSoldHalf && currentPriceUSD >= firstSellPrice,
-    secondSell: currentPriceUSD >= secondSellPrice,
+    firstSell: !token.hasSoldHalf && currentPriceUSD >= firstSellPrice && timeSinceBuy >= minHoldTime,
+    secondSell: currentPriceUSD >= secondSellPrice && timeSinceBuy >= minHoldTime,
     stopLoss: currentPriceUSD <= stopLossPrice,
     stagnation: token.lastPriceChange && 
-      (now.getTime() - token.lastPriceChange.getTime()) / 1000 > tradingParams.priceStagnationTimeoutSeconds
+      (now.getTime() - token.lastPriceChange.getTime()) / 1000 > tradingParams.priceStagnationTimeoutSeconds,
+    longTermStagnation: token.lastPriceChange && 
+      (now.getTime() - token.lastPriceChange.getTime()) / 1000 > tradingParams.longTermStagnationTimeoutSeconds
   };
 
   // Determine sell type
@@ -77,6 +92,10 @@ function shouldSell(token, pattern, config) {
   if (sellConditions.stagnation) {
     return { shouldSell: true, amountMode: 'all', reason: 'price_stagnation' };
   }
+  
+  if (sellConditions.longTermStagnation) {
+    return { shouldSell: true, amountMode: 'all', reason: 'long_term_stagnation' };
+  }
 
   return false;
 }
@@ -87,16 +106,18 @@ function getTradingParams(pattern) {
   }
   
   return {
-    buyThresholdUSD: pattern.trading.buyThresholdUSD,
-    sellThresholdUSD: pattern.trading.sellThresholdUSD,
-    buyAmountBNB: pattern.trading.buyAmountBNB,
-    maxBuyAmountBNB: pattern.trading.maxBuyAmountBNB,
-    takeProfitPercent: pattern.trading.takeProfitPercent,
+    buyPriceThresholdUSD: pattern.trading.buyPriceThresholdUSD,
+    buyAmount: pattern.trading.buyAmount,
+    holdTimeSeconds: pattern.trading.holdTimeSeconds,
+    maxSlippage: pattern.trading.maxSlippage,
     stopLossPercent: pattern.trading.stopLossPercent,
-    firstSellPercent: pattern.trading.firstSellPercent,
-    secondSellPercent: pattern.trading.secondSellPercent,
+    takeProfitPercent: pattern.trading.takeProfitPercent,
+    buyDelaySeconds: pattern.trading.buyDelaySeconds,
+    firstSellThresholdPercent: pattern.trading.firstSellThresholdPercent,
+    secondSellThresholdPercent: pattern.trading.secondSellThresholdPercent,
     stopLossFromPeakPercent: pattern.trading.stopLossFromPeakPercent,
-    priceStagnationTimeoutSeconds: pattern.trading.priceStagnationTimeoutSeconds
+    priceStagnationTimeoutSeconds: pattern.trading.priceStagnationTimeoutSeconds,
+    longTermStagnationTimeoutSeconds: pattern.trading.longTermStagnationTimeoutSeconds
   };
 }
 

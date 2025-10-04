@@ -580,14 +580,16 @@ class SimplePriceBasedTradingService {
       // Display pattern configurations
       console.log('🎯 Pattern Configurations:');
       this.patterns.forEach((pattern, index) => {
-        console.log(`   ${index + 1}. ${pattern.name}`);
+        console.log(`   ${index + 1}. ${pattern.name} (${pattern.enabled ? 'ENABLED' : 'DISABLED'})`);
         console.log(`      Gas Price: ${pattern.gasPrice.min}-${pattern.gasPrice.max} Gwei`);
         console.log(`      Gas Limit: ${pattern.gasLimit.min}-${pattern.gasLimit.max}`);
-        console.log(`      Buy Threshold: $${pattern.trading.buyThresholdUSD}`);
-        console.log(`      Sell Threshold: $${pattern.trading.sellThresholdUSD}`);
-        console.log(`      Buy Amount: ${pattern.trading.buyAmountBNB} BNB`);
-        console.log(`      Take Profit: ${pattern.trading.takeProfitPercent}%`);
-        console.log(`      Stop Loss: ${pattern.trading.stopLossPercent}%`);
+        console.log(`      Buy Threshold: $${pattern.trading.buyPriceThresholdUSD}`);
+        console.log(`      Buy Amount: ${pattern.trading.buyAmount} BNB`);
+        console.log(`      Buy Delay: ${pattern.trading.buyDelaySeconds}s`);
+        console.log(`      Hold Time: ${pattern.trading.holdTimeSeconds}s`);
+        console.log(`      First Sell: ${pattern.trading.firstSellThresholdPercent}%`);
+        console.log(`      Second Sell: ${pattern.trading.secondSellThresholdPercent}%`);
+        console.log(`      Stop Loss: ${pattern.trading.stopLossFromPeakPercent}%`);
         console.log('');
       });
 
@@ -1001,7 +1003,7 @@ class SimplePriceBasedTradingService {
             // Use pattern-based buy amount
             const tradingParams = getTradingParams(token.matchedPattern);
             const originalBuyAmount = this.config.trading.buyAmountBNB;
-            this.config.trading.buyAmountBNB = tradingParams.buyAmountBNB;
+            this.config.trading.buyAmountBNB = tradingParams.buyAmount;
             
             await this.executeBuy(token);
             
@@ -1059,8 +1061,8 @@ class SimplePriceBasedTradingService {
       if (this.config.trading.testMode) {
         console.log(`🧪 TEST MODE: Would buy ${token.tokenAddress.slice(0, 8)}...`);
         console.log(`   Pattern: ${token.matchedPattern.name}`);
-        console.log(`   Buy Amount: ${tradingParams.buyAmountBNB} BNB`);
-        console.log(`   Buy Threshold: $${tradingParams.buyThresholdUSD}`);
+        console.log(`   Buy Amount: ${tradingParams.buyAmount} BNB`);
+        console.log(`   Buy Threshold: $${tradingParams.buyPriceThresholdUSD}`);
         console.log(`   Current Price: $${token.currentPriceUSD.toFixed(8)}`);
         
         token.hasBeenTraded = true;
@@ -1078,12 +1080,12 @@ class SimplePriceBasedTradingService {
 
       console.log(`🔄 Executing REAL buy order for ${token.tokenAddress.slice(0, 8)}...`);
       console.log(`   Pattern: ${token.matchedPattern.name}`);
-      console.log(`   Amount: ${tradingParams.buyAmountBNB} BNB`);
+      console.log(`   Amount: ${tradingParams.buyAmount} BNB`);
       console.log(`   Price: $${token.currentPriceUSD.toFixed(8)}`);
 
       // Temporarily update config with pattern-based buy amount
       const originalBuyAmount = this.config.trading.buyAmountBNB;
-      this.config.trading.buyAmountBNB = tradingParams.buyAmountBNB;
+      this.config.trading.buyAmountBNB = tradingParams.buyAmount;
 
       // Execute real buy transaction
       const buyResult = await this.executeRealBuy(token);
