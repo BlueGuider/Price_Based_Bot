@@ -73,7 +73,8 @@ class SimpleSecurityUtils {
 
 class SimplePriceBasedTradingService {
   constructor() {
-    this.config = loadConfig();
+    // Use the service's own config loader so defaults are applied when file is missing
+    this.config = this.loadConfig();
     this.patterns = loadPatterns();
     this.monitoredTokens = new Map();
     this.isMonitoring = false;
@@ -995,11 +996,6 @@ class SimplePriceBasedTradingService {
         await this.withBuyLock(token.tokenAddress, async () => {
           // Double-check conditions inside lock
           if (shouldBuy(token, token.matchedPattern, this.config)) {
-            token.positionOpen = true;
-            token.buyPriceUSD = token.currentPriceUSD;
-            token.peakPriceSinceLastSell = token.currentPriceUSD;
-            token.lastPriceChange = new Date();
-            
             // Use pattern-based buy amount
             const tradingParams = getTradingParams(token.matchedPattern);
             const originalBuyAmount = this.config.trading.buyAmountBNB;
@@ -1284,16 +1280,22 @@ class SimplePriceBasedTradingService {
    */
   async executeRealBuy(token) {
     try {
-      // Get funded wallets
+      // Get funded wallets with dynamic gas buffer based on current gas price
+      const gasPrice = await this.getCurrentGasPrice();
+      // rough gas cost estimate for buy: gasLimit * gasPrice (both in wei) converted to BNB
+      const estimatedGasBnB = Number((500000n * gasPrice)) / 1e18; // uses 500k default gas
+      const safetyGasBnB = Math.max(0.0005, estimatedGasBnB * 1.2); // min 0.0005 BNB buffer
+      const minBalanceForBuy = this.config.trading.buyAmountBNB + safetyGasBnB;
+
       const fundedWallets = this.availableWallets.filter(wallet =>
-        wallet.balanceBNB >= this.config.trading.buyAmountBNB + 0.001 // Add gas buffer
+        wallet.balanceBNB >= minBalanceForBuy
       );
 
       if (fundedWallets.length === 0) {
         return { success: false, error: 'No funded wallets available' };
       }
 
-      console.log(`💰 Using ${fundedWallets.length} funded wallets for buy`);
+      console.log(`💰 Using ${fundedWallets.length} funded wallets for buy (min balance: ${minBalanceForBuy.toFixed(6)} BNB)`);
 
       // Check if token is migrated to PancakeSwap
       const isMigrated = await this.isTokenMigrated(token.tokenAddress);
@@ -1327,7 +1329,7 @@ class SimplePriceBasedTradingService {
 
           // Encode transaction data based on token version
           let transactionData;
-          if (tokenInfo.data.version === 1) {
+          if (Number(tokenInfo.data.version) === 1) {
             transactionData = this.encodeFunctionData({
               abi: this.TOKEN_MANAGER_V1_ABI,
               functionName: 'purchaseTokenAMAP',
@@ -1359,6 +1361,12 @@ class SimplePriceBasedTradingService {
             nonce,
             data: transactionData
           });
+
+          // Wait for confirmation to ensure tokens will be received before allowing sells
+          const receipt = await this.publicClient.waitForTransactionReceipt({ hash: txHash });
+          if (!receipt || receipt.status !== 'success') {
+            throw new Error('Buy transaction failed to confirm');
+          }
 
           txHashes.push(txHash);
           successCount++;
