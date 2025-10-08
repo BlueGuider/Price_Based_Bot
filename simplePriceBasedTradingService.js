@@ -1090,6 +1090,7 @@ class SimplePriceBasedTradingService {
       this.config.trading.buyAmountBNB = originalBuyAmount;
 
       if (buyResult.success) {
+        token.positionOpen = true;
         token.hasBeenTraded = true;
         token.buyPriceUSD = token.currentPriceUSD;
         token.buyTransactionHash = buyResult.transactionHash;
