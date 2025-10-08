@@ -51,6 +51,16 @@ function shouldSell(token, pattern, config) {
   const buyPriceUSD = token.buyPriceUSD;
   const now = new Date();
   
+  // Require confirmed buy state
+  if (!token.buyTime) {
+    return false;
+  }
+  // Grace period after buy to avoid immediate stop-loss before balances settle
+  const graceSeconds = Math.max(0, Number(config.trading.postBuySellGraceSeconds || 5));
+  if (((now.getTime() - token.buyTime.getTime()) / 1000) < graceSeconds) {
+    return false;
+  }
+  
   if (!buyPriceUSD || buyPriceUSD <= 0) {
     return false;
   }
